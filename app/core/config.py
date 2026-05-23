@@ -57,15 +57,17 @@ class Settings(BaseSettings):
     embedding_server_url: str = ""  # validation_alias: EMBEDDING_SERVER_URL if set in env
 
     # === Embedding provider ===
-    # "openai" | "qwen_server" | "placeholder"
-    # - openai:     OpenAI Embeddings API 사용 (text-embedding-3-small). 별도 컬렉션 사용.
-    # - qwen_server: embedding_server_url 의 Qwen3-Embedding-4B 서버 사용 (2560-dim). 기존 ingest 와 호환.
+    # "qwen_server" | "openai" | "placeholder"
+    # - qwen_server: embedding_server_url 의 Qwen3-Embedding-4B 서버 사용 (2560-dim). 기존 ingest 와 호환. **기본값**
+    # - openai:     OpenAI Embeddings API 사용 (text-embedding-3-small, 1536-dim). 별도 ingest 필요.
     # - placeholder: 결정적 placeholder (디버그용, RAG 품질 보장 안 됨).
-    embedding_provider: str = "openai"
+    embedding_provider: str = "qwen_server"
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dim: int = 1536
+    # 비워두면 CROMA_COLLECTION_NAME (croma_collection_name) 을 그대로 사용한다.
+    # 별도 컬렉션으로 분리하고 싶을 때만 OPENAI_COLLECTION_NAME 을 명시.
     openai_collection_name: str = Field(
-        "smu_notices_openai",
+        "",
         validation_alias=AliasChoices("OPENAI_COLLECTION_NAME", "CROMA_OPENAI_COLLECTION_NAME"),
     )
     # 서버 기동 시 OpenAI 컬렉션이 비어 있으면 자동 ingest. 비용/시간 이슈로 기본 False.

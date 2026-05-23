@@ -56,8 +56,10 @@ def _provider() -> str:
 
 def active_collection_name() -> str:
     settings = get_settings()
+    # OpenAI mode 에서 OPENAI_COLLECTION_NAME 을 명시하지 않으면 CROMA_COLLECTION_NAME 을 그대로 사용한다.
     if _provider() == "openai":
-        return settings.openai_collection_name
+        override = (settings.openai_collection_name or "").strip()
+        return override or settings.croma_collection_name
     return settings.croma_collection_name
 
 
@@ -236,14 +238,15 @@ def ingest_chunks_with_openai(limit: int | None = None, batch_size: int = 100, f
         logger.warning("chunks.jsonl 이 없어 OpenAI ingest 를 건너뜁니다: %s", chunks_path)
         return 0
 
-    # 강제로 OpenAI 컬렉션을 잡는다
+    # OpenAI 모드에서 사용할 컬렉션을 잡는다 (active_collection_name 과 동일 규칙)
+    target_name = (settings.openai_collection_name or "").strip() or settings.croma_collection_name
     client = get_chroma_client()
-    collection = client.get_or_create_collection(name=settings.openai_collection_name)
+    collection = client.get_or_create_collection(name=target_name)
 
     existing = 0 if force else collection.count()
     logger.info(
         "OpenAI ingest 시작: collection=%s existing=%d batch=%d limit=%s",
-        settings.openai_collection_name,
+        target_name,
         existing,
         batch_size,
         limit,

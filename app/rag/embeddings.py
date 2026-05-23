@@ -83,24 +83,22 @@ def _openai_embed_batch(texts: List[str]) -> List[List[float]]:
 
 def embed_query(text: str) -> List[float]:
     settings = get_settings()
-    provider = (settings.embedding_provider or "openai").lower()
-
-    if provider == "openai":
-        try:
-            return _openai_embed_batch([text])[0]
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("OpenAI 임베딩 실패 — placeholder 로 폴백: %s", exc)
+    provider = (settings.embedding_provider or "qwen_server").lower()
 
     if provider == "qwen_server":
         emb = _qwen_embed(text)
         if emb is not None:
             return emb
+        logger.warning(
+            "embed_query: Qwen 서버 응답 실패 — placeholder 폴백 (URL=%s)",
+            settings.embedding_server_url or "(미설정)",
+        )
+    elif provider == "openai":
+        try:
+            return _openai_embed_batch([text])[0]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OpenAI 임베딩 실패 — placeholder 폴백: %s", exc)
 
-    # fallback
-    logger.warning(
-        "embed_query: provider=%s — placeholder 벡터 사용 (검색 품질 보장되지 않음)",
-        provider,
-    )
     dim = settings.openai_embedding_dim if provider == "openai" else settings.embedding_dim
     return _deterministic_placeholder(text, dim)
 
