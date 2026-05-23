@@ -60,15 +60,17 @@ def get_chroma_client():
         raise RuntimeError("CROMA_API_KEY 환경변수가 비어 있습니다.")
 
     # chromadb >=0.5.5 CloudClient 사용 (Chroma Cloud)
-    _client = chromadb.CloudClient(
-        api_key=settings.croma_api_key,
-        tenant=settings.croma_tenant_id,
-        database=settings.chroma_database,
-    )
+    client_kwargs = {"api_key": settings.croma_api_key}
+    if settings.croma_tenant_id:
+        client_kwargs["tenant"] = settings.croma_tenant_id
+    if settings.croma_database_name:
+        client_kwargs["database"] = settings.croma_database_name
+
+    _client = chromadb.CloudClient(**client_kwargs)
     logger.info(
         "Chroma Cloud 연결 완료: tenant=%s database=%s",
-        settings.croma_tenant_id,
-        settings.chroma_database,
+        settings.croma_tenant_id or "(auto)",
+        settings.croma_database_name or "(auto)",
     )
     return _client
 

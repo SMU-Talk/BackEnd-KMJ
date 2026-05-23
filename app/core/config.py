@@ -2,7 +2,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,11 +38,17 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_chat_model: str = "gpt-4o-mini"
 
-    # NOTE: env keys use `CROMA_*` per project convention; settings field names map via env.
-    croma_api_key: str = ""
-    croma_tenant_id: str = "default_tenant"
-    chroma_database: str = "default_database"
-    croma_collection_name: str = "smu_notices"
+    # NOTE: env keys use `CROMA_*` per project convention. Official `CHROMA_*` names are accepted too.
+    croma_api_key: str = Field("", validation_alias=AliasChoices("CROMA_API_KEY", "CHROMA_API_KEY"))
+    croma_tenant_id: str = Field("", validation_alias=AliasChoices("CROMA_TENANT_ID", "CHROMA_TENANT"))
+    croma_database_name: str = Field(
+        "",
+        validation_alias=AliasChoices("CROMA_DATABASE_NAME", "CROMA_DATABASE", "CHROMA_DATABASE"),
+    )
+    croma_collection_name: str = Field(
+        "smu_notices",
+        validation_alias=AliasChoices("CROMA_COLLECTION_NAME", "CHROMA_COLLECTION_NAME"),
+    )
     chroma_top_k: int = 5
 
     embedding_dim: int = 2560
