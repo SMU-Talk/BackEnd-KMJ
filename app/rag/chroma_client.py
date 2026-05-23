@@ -87,7 +87,6 @@ def get_collection():
         client = get_chroma_client()
         _collection = client.get_or_create_collection(
             name=settings.croma_collection_name,
-            metadata={"hnsw:space": "cosine"},
         )
         logger.info("Chroma 컬렉션 확보: %s", settings.croma_collection_name)
         return _collection
