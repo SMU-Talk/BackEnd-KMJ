@@ -1,54 +1,139 @@
 """쿼리 임베딩 클라이언트.
 
-현재는 실제 임베딩 서버(Qwen3-Embedding-4B)가 아직 붙지 않았으므로
-플레이스홀더로 동작한다. 서버 연결 후 :func:`embed_query` 만 교체하면
-RAG 파이프라인의 다른 부분은 그대로 사용할 수 있다.
+3가지 제공자(provider) 를 지원한다:
+  - "openai":       OpenAI Embeddings API (text-embedding-3-small, 1536-dim) - 기본값.
+                    학교 자체 임베딩 서버가 붙기 전까지 실제로 동작하는 RAG 경로.
+  - "qwen_server":  EMBEDDING_SERVER_URL 의 Qwen3-Embedding-4B 서버 (2560-dim).
+                    기존 embeddings.npy 와 dim 일치.
+  - "placeholder":  결정적 placeholder. 디버그 외에는 비추천.
 
-연결 후 예상되는 호출:
-    POST {EMBEDDING_SERVER_URL}/embed  {"text": "..."}
-    -> {"embedding": [float, ... len=2560]}
+호출 측은 :func:`embed_query` 와 :func:`embed_texts` 만 사용하면 된다.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
+from functools import lru_cache
 from typing import List
+
+import httpx
 
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 
-def _deterministic_placeholder(text: str, dim: int) -> List[float]:
-    """디버그/개발용 결정적 placeholder 벡터. 동일 텍스트는 항상 같은 벡터를 반환한다.
+# ---------- placeholder ----------
 
-    Chroma 가 빈 결과를 돌려주는 사태를 막기 위한 임시 값이며, 실제 검색 품질은
-    임베딩 서버를 붙인 이후에야 의미가 있다.
-    """
+def _deterministic_placeholder(text: str, dim: int) -> List[float]:
     digest = hashlib.sha512(text.encode("utf-8")).digest()
     raw = [(b - 128) / 128.0 for b in digest]
     repeated = (raw * ((dim // len(raw)) + 1))[:dim]
-    # L2 정규화 (cosine 검색용)
     norm = sum(v * v for v in repeated) ** 0.5 or 1.0
     return [v / norm for v in repeated]
 
 
-def embed_query(text: str) -> List[float]:
-    """질의 텍스트 -> 벡터.
+# ---------- Qwen embedding server (HTTP) ----------
 
-    TODO: 임베딩 서버 엔드포인트가 정해지면 httpx.post 로 교체.
-    예시 (서버 측: Qwen3-Embedding-4B, dim=2560):
-
-        import httpx
-        with httpx.Client(timeout=10.0) as cli:
-            resp = cli.post(f"{settings.embedding_server_url}/embed", json={"text": text})
-            resp.raise_for_status()
-            return resp.json()["embedding"]
-    """
+def _qwen_embed(text: str) -> List[float] | None:
     settings = get_settings()
-    logger.warning(
-        "embed_query: 임베딩 서버 미연결 — 결정적 placeholder 벡터를 사용합니다. dim=%d",
-        settings.embedding_dim,
+    if not settings.embedding_server_url:
+        return None
+    try:
+        with httpx.Client(timeout=10.0) as cli:
+            resp = cli.post(
+                f"{settings.embedding_server_url.rstrip('/')}/embed",
+                json={"text": text},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            emb = data.get("embedding") or data.get("vector")
+            if not emb:
+                raise RuntimeError("임베딩 응답에 'embedding' 필드가 없습니다")
+            return list(map(float, emb))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Qwen embed server 호출 실패: %s", exc)
+        return None
+
+
+# ---------- OpenAI embeddings ----------
+
+@lru_cache(maxsize=1)
+def _openai_client():
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY 가 설정되지 않았습니다.")
+    from openai import OpenAI  # type: ignore
+
+    return OpenAI(api_key=settings.openai_api_key)
+
+
+def _openai_embed_batch(texts: List[str]) -> List[List[float]]:
+    settings = get_settings()
+    client = _openai_client()
+    resp = client.embeddings.create(
+        model=settings.openai_embedding_model,
+        input=texts,
     )
-    return _deterministic_placeholder(text, settings.embedding_dim)
+    return [list(d.embedding) for d in resp.data]
+
+
+# ---------- public API ----------
+
+def embed_query(text: str) -> List[float]:
+    settings = get_settings()
+    provider = (settings.embedding_provider or "openai").lower()
+
+    if provider == "openai":
+        try:
+            return _openai_embed_batch([text])[0]
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OpenAI 임베딩 실패 — placeholder 로 폴백: %s", exc)
+
+    if provider == "qwen_server":
+        emb = _qwen_embed(text)
+        if emb is not None:
+            return emb
+
+    # fallback
+    logger.warning(
+        "embed_query: provider=%s — placeholder 벡터 사용 (검색 품질 보장되지 않음)",
+        provider,
+    )
+    dim = settings.openai_embedding_dim if provider == "openai" else settings.embedding_dim
+    return _deterministic_placeholder(text, dim)
+
+
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """배치 임베딩. OpenAI provider 일 때만 효율적인 배치 호출."""
+    settings = get_settings()
+    provider = (settings.embedding_provider or "openai").lower()
+
+    if provider == "openai":
+        return _openai_embed_batch(texts)
+
+    # 다른 provider 는 단건 호출을 반복
+    return [embed_query(t) for t in texts]
+
+
+def active_embedding_dim() -> int:
+    settings = get_settings()
+    provider = (settings.embedding_provider or "openai").lower()
+    if provider == "openai":
+        return settings.openai_embedding_dim
+    return settings.embedding_dim
+
+
+def verify_openai_connection() -> tuple[bool, str]:
+    """OpenAI 연결 헬스체크. (성공 여부, 사유) 반환."""
+    settings = get_settings()
+    if not settings.openai_api_key:
+        return False, "OPENAI_API_KEY 가 비어 있습니다."
+    try:
+        client = _openai_client()
+        # 가벼운 호출: 1차원짜리 임베딩 1개
+        client.embeddings.create(model=settings.openai_embedding_model, input=["ping"])
+        return True, f"OK (model={settings.openai_embedding_model}, dim={settings.openai_embedding_dim})"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"

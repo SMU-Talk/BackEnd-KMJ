@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncGenerator
 
 from app.core.config import get_settings
@@ -26,6 +27,24 @@ def _filter_label(filters: ChatFilters) -> str:
     if filters.tags:
         base = f"{base} / 태그: {', '.join(filters.tags)}"
     return base
+
+
+# 메타/잡담 패턴: 매칭되면 RAG 검색 결과를 카드로 띄우지 않는다.
+_META_PATTERNS = (
+    r"안녕", r"하이", r"헬로", r"hello", r"hi\b",
+    r"넌\s*누구", r"너\s*누구", r"누구야", r"누구세요", r"이름이?\s*뭐",
+    r"뭘?\s*할\s*수\s*있", r"무엇을?\s*할\s*수\s*있", r"역할", r"기능", r"도움말",
+    r"사용법", r"어떻게\s*써", r"how\s*do\s*you", r"what\s*can\s*you",
+    r"고마워", r"감사", r"thanks",
+)
+_META_RE = re.compile("|".join(_META_PATTERNS), re.IGNORECASE)
+
+
+def _is_meta_question(question: str) -> bool:
+    q = (question or "").strip()
+    if not q:
+        return True
+    return bool(_META_RE.search(q))
 
 
 def _build_messages(question: str, filters: ChatFilters, context: str) -> list[dict[str, str]]:
@@ -47,7 +66,13 @@ def _get_openai_client():
 
 def answer_notice(question: str, filters: ChatFilters) -> ChatResponse:
     """비-스트리밍 응답 (기존 /api/chat 호환). OpenAI 가 실패하면 컨텍스트 요약으로 폴백."""
-    notices, context = retrieve_context(question, filters)
+    is_meta = _is_meta_question(question)
+    if is_meta:
+        notices: list[Notice] = []
+        context = ""
+        logger.info("메타 질문으로 판별 — RAG 스킵: %r", question)
+    else:
+        notices, context = retrieve_context(question, filters)
     label = _filter_label(filters)
 
     try:
@@ -73,7 +98,12 @@ async def stream_answer_notice(
     question: str, filters: ChatFilters
 ) -> AsyncGenerator[str, None]:
     """SSE 스트림. 첫 이벤트로 notices 메타데이터, 이후 token 청크, 마지막에 done."""
-    notices, context = retrieve_context(question, filters)
+    if _is_meta_question(question):
+        notices: list[Notice] = []
+        context = ""
+        logger.info("메타 질문으로 판별 — RAG 스킵: %r", question)
+    else:
+        notices, context = retrieve_context(question, filters)
 
     yield _sse_event("notices", {"notices": [n.model_dump() for n in notices]})
 

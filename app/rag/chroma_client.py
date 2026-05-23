@@ -1,7 +1,12 @@
 """Chroma Cloud 클라이언트와 컬렉션 초기화 로직.
 
-CROMA_API_KEY 를 사용하여 Chroma Cloud 에 연결하고, smu_notices 컬렉션을 확보한다.
-임베딩 ingest 는 :func:`ensure_collection_populated` 에서 처리한다.
+embedding_provider 값에 따라 사용하는 컬렉션이 달라진다:
+  - openai     -> settings.openai_collection_name (e.g. "smu_notices_openai", 1536-dim)
+  - 그 외       -> settings.croma_collection_name  (e.g. "smu_notices",        2560-dim)
+
+ingest 함수:
+  - :func:`ensure_collection_populated`   : 기존 embeddings.npy(2560-dim Qwen) 적재 (qwen_server / placeholder 모드용)
+  - :func:`ingest_chunks_with_openai`     : chunks.jsonl 텍스트를 OpenAI 로 재임베딩 후 적재
 """
 
 from __future__ import annotations
@@ -45,6 +50,17 @@ _META_KEYS = (
 )
 
 
+def _provider() -> str:
+    return (get_settings().embedding_provider or "openai").lower()
+
+
+def active_collection_name() -> str:
+    settings = get_settings()
+    if _provider() == "openai":
+        return settings.openai_collection_name
+    return settings.croma_collection_name
+
+
 def get_chroma_client():
     global _client
     if _client is not None:
@@ -59,7 +75,6 @@ def get_chroma_client():
     if not settings.croma_api_key:
         raise RuntimeError("CROMA_API_KEY 환경변수가 비어 있습니다.")
 
-    # chromadb >=0.5.5 CloudClient 사용 (Chroma Cloud)
     client_kwargs = {"api_key": settings.croma_api_key}
     if settings.croma_tenant_id:
         client_kwargs["tenant"] = settings.croma_tenant_id
@@ -83,13 +98,26 @@ def get_collection():
     with _init_lock:
         if _collection is not None:
             return _collection
-        settings = get_settings()
         client = get_chroma_client()
-        _collection = client.get_or_create_collection(
-            name=settings.croma_collection_name,
-        )
-        logger.info("Chroma 컬렉션 확보: %s", settings.croma_collection_name)
+        name = active_collection_name()
+        _collection = client.get_or_create_collection(name=name)
+        logger.info("Chroma 컬렉션 확보: %s (provider=%s)", name, _provider())
         return _collection
+
+
+def reset_collection_cache() -> None:
+    """provider 변경 후 컬렉션 캐시 무효화."""
+    global _collection
+    _collection = None
+
+
+def verify_chroma_connection() -> tuple[bool, str]:
+    try:
+        col = get_collection()
+        cnt = col.count()
+        return True, f"OK (collection={active_collection_name()}, count={cnt})"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
 
 
 def _scalar(value: Any) -> Any:
@@ -107,10 +135,15 @@ def _build_metadata(chunk: dict[str, Any]) -> dict[str, Any]:
 
 
 def ensure_collection_populated(force: bool = False) -> int:
-    """precomputed embeddings.npy + chunks.jsonl 을 Chroma 에 ingest.
+    """precomputed embeddings.npy(2560-dim Qwen) + chunks.jsonl 적재.
 
-    이미 컬렉션에 동일 건수가 들어있으면 skip. 반환값은 새로 업서트한 건수.
+    embedding_provider == "openai" 일 때는 dim 불일치라 건너뛴다.
     """
+    if _provider() == "openai":
+        logger.info("embedding_provider=openai 이므로 Qwen 사전 임베딩 ingest 는 건너뜁니다. "
+                    "ingest_chunks_with_openai() 를 호출하세요.")
+        return 0
+
     settings = get_settings()
     collection = get_collection()
 
@@ -137,7 +170,7 @@ def ensure_collection_populated(force: bool = False) -> int:
         logger.info("Chroma 컬렉션 이미 채워져 있음 (existing=%d, total=%d) — ingest skip", existing, total)
         return 0
 
-    logger.info("Chroma ingest 시작: existing=%d, target=%d", existing, total)
+    logger.info("Chroma ingest 시작 (Qwen vectors): existing=%d, target=%d", existing, total)
 
     batch = 256
     inserted = 0
@@ -173,4 +206,88 @@ def ensure_collection_populated(force: bool = False) -> int:
             inserted += len(ids)
 
     logger.info("Chroma ingest 완료: 총 %d 건 upsert", inserted)
+    return inserted
+
+
+def ingest_chunks_with_openai(limit: int | None = None, batch_size: int = 100, force: bool = False) -> int:
+    """chunks.jsonl 의 텍스트를 OpenAI 임베딩으로 재계산하여 OpenAI 컬렉션에 적재.
+
+    Args:
+      limit: 최대 처리 청크 수 (None = 전체). 비용/시간 통제용.
+      batch_size: OpenAI embeddings 한 번 호출 당 텍스트 수. 100~256 권장.
+      force: 이미 존재해도 다시 upsert.
+
+    Returns:
+      새로 upsert 한 건수.
+    """
+    from app.rag.embeddings import embed_texts  # 지연 임포트 (순환 방지)
+
+    settings = get_settings()
+    chunks_path = Path(settings.chunks_path)
+    if not chunks_path.exists():
+        logger.warning("chunks.jsonl 이 없어 OpenAI ingest 를 건너뜁니다: %s", chunks_path)
+        return 0
+
+    # 강제로 OpenAI 컬렉션을 잡는다
+    client = get_chroma_client()
+    collection = client.get_or_create_collection(name=settings.openai_collection_name)
+
+    existing = 0 if force else collection.count()
+    logger.info(
+        "OpenAI ingest 시작: collection=%s existing=%d batch=%d limit=%s",
+        settings.openai_collection_name,
+        existing,
+        batch_size,
+        limit,
+    )
+
+    inserted = 0
+    buf_ids: list[str] = []
+    buf_docs: list[str] = []
+    buf_metas: list[dict[str, Any]] = []
+
+    def flush():
+        nonlocal inserted
+        if not buf_ids:
+            return
+        try:
+            vectors = embed_texts(buf_docs)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("OpenAI 배치 임베딩 실패: %s — 해당 배치 건너뜀", exc)
+            buf_ids.clear()
+            buf_docs.clear()
+            buf_metas.clear()
+            return
+        collection.upsert(ids=buf_ids, documents=buf_docs, embeddings=vectors, metadatas=buf_metas)
+        inserted += len(buf_ids)
+        logger.info("OpenAI upsert 진행: +%d (누적 %d)", len(buf_ids), inserted)
+        buf_ids.clear()
+        buf_docs.clear()
+        buf_metas.clear()
+
+    with chunks_path.open("r", encoding="utf-8") as f:
+        for idx, line in enumerate(f):
+            if not force and idx < existing:
+                continue
+            if limit is not None and inserted + len(buf_ids) >= limit:
+                break
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            text = (chunk.get("text") or "").strip()
+            if not text:
+                continue
+
+            buf_ids.append(str(chunk.get("chunk_id", idx)))
+            buf_docs.append(text)
+            buf_metas.append(_build_metadata(chunk))
+
+            if len(buf_ids) >= batch_size:
+                flush()
+
+        flush()
+
+    logger.info("OpenAI ingest 완료: 총 %d 건 upsert", inserted)
     return inserted

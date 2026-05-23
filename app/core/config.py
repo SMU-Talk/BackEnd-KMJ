@@ -54,6 +54,20 @@ class Settings(BaseSettings):
     embedding_dim: int = 2560
     embeddings_path: str = str(DEFAULT_RELEASE_DIR / "embeddings.npy")
     chunks_path: str = str(DEFAULT_RELEASE_DIR / "chunks.jsonl")
+    embedding_server_url: str = ""  # validation_alias: EMBEDDING_SERVER_URL if set in env
+
+    # === Embedding provider ===
+    # "openai" | "qwen_server" | "placeholder"
+    # - openai:     OpenAI Embeddings API 사용 (text-embedding-3-small). 별도 컬렉션 사용.
+    # - qwen_server: embedding_server_url 의 Qwen3-Embedding-4B 서버 사용 (2560-dim). 기존 ingest 와 호환.
+    # - placeholder: 결정적 placeholder (디버그용, RAG 품질 보장 안 됨).
+    embedding_provider: str = "openai"
+    openai_embedding_model: str = "text-embedding-3-small"
+    openai_embedding_dim: int = 1536
+    openai_collection_name: str = Field(
+        "smu_notices_openai",
+        validation_alias=AliasChoices("OPENAI_COLLECTION_NAME", "CROMA_OPENAI_COLLECTION_NAME"),
+    )
 
     # === Crawling ===
     smu_notice_list_url: str = "https://www.smu.ac.kr/kor/life/notice.do?srCampus=smu"
