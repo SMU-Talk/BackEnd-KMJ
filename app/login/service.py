@@ -11,6 +11,9 @@ from app.database import get_db
 from app.login.smu_sso import SmuLoginError, SmuSsoClient
 from app.models import User
 from app.schemas import TokenResponse, UserResponse
+import logging
+
+logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 _session_refreshed_at: dict[int, datetime] = {}
@@ -25,18 +28,22 @@ def to_user_response(user: User) -> UserResponse:
 
 
 async def login_with_smu(db: Session, user_id: str, password: str) -> TokenResponse:
+    logger.info("login_with_smu called for user=%s", user_id)
     try:
         smu_session = await SmuSsoClient().login(user_id=user_id, password=password)
     except SmuLoginError as exc:
+        logger.info("SSO login failed for user=%s: %s", user_id, exc)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
     user = db.scalar(select(User).where(User.nickname == user_id))
 
     encrypted_password = encrypt_secret(password)
     if user:
+        logger.debug("Updating existing user=%s session", user_id)
         user.password = encrypted_password
         user.eXSignOnSessionID = smu_session.session_id
     else:
+        logger.debug("Creating new user=%s", user_id)
         user = User(password=encrypted_password, nickname=user_id, eXSignOnSessionID=smu_session.session_id)
         db.add(user)
 

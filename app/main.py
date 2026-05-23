@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -47,6 +48,20 @@ async def lifespan(_: FastAPI):
 
 
 settings = get_settings()
+
+# Basic logging setup: stream + rotating file in ./logs/backend.log
+log_level = logging.INFO
+logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+try:
+    logs_dir = Path(__file__).resolve().parents[2] / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    fh = logging.FileHandler(logs_dir / "backend.log", encoding="utf-8")
+    fh.setLevel(log_level)
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(fh)
+except Exception:
+    logger.warning("로그 파일 핸들러 생성 실패; 계속 진행합니다.")
+
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(

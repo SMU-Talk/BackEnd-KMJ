@@ -1,10 +1,13 @@
 import re
 from dataclasses import dataclass
 from html import unescape
+import logging
 
 import httpx
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class SmuLoginError(RuntimeError):
@@ -30,14 +33,20 @@ class SmuSsoClient:
         }
 
         try:
+            logger.debug("SSO login attempt for user=%s", user_id)
             async with httpx.AsyncClient(
                 headers=headers,
                 follow_redirects=True,
                 timeout=self.settings.http_timeout_seconds,
             ) as client:
+                logger.debug("Requesting auth page: %s", self.settings.smu_auth_url)
                 auth_response = await client.get(self.settings.smu_auth_url)
                 auth_response.raise_for_status()
 
+                l_token = self._extract_l_token(auth_response.text)
+                logger.debug("Extracted l_token: %s", bool(l_token))
+
+                logger.debug("Posting login to %s (user=%s)", self.settings.smu_login_url, user_id)
                 login_response = await client.post(
                     self.settings.smu_login_url,
                     data=self._login_form(auth_response.text, user_id, password),
@@ -47,15 +56,28 @@ class SmuSsoClient:
                         "Referer": self.settings.smu_auth_url,
                     },
                 )
+                logger.debug("Login response status: %s", login_response.status_code)
                 login_response.raise_for_status()
 
                 session_id = self._find_session_id(client, login_response)
                 if not session_id:
+                    # Log helpful diagnostic info without exposing credentials
+                    logger.info(
+                        "SSO login failed for user=%s; cookies=%s; history_len=%d",
+                        user_id,
+                        {c.name: c.value for c in client.cookies.jar},
+                        len(login_response.history),
+                    )
                     raise SmuLoginError("학교 SSO 로그인에 실패했습니다. 아이디와 비밀번호를 확인해주세요.")
 
+                logger.info("SSO login succeeded for user=%s; session_id_present=%s", user_id, bool(session_id))
                 return SmuSession(session_id=session_id)
         except httpx.HTTPError as exc:
+            logger.exception("HTTP error during SSO login for user=%s", user_id)
             raise SmuLoginError("학교 SSO 서버와 통신할 수 없습니다. 잠시 후 다시 시도해주세요.") from exc
+        except Exception:
+            logger.exception("Unexpected error during SSO login for user=%s", user_id)
+            raise
 
     def _login_form(self, html: str, user_id: str, password: str) -> dict[str, str]:
         return {
