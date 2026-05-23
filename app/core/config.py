@@ -68,6 +68,10 @@ class Settings(BaseSettings):
         "smu_notices_openai",
         validation_alias=AliasChoices("OPENAI_COLLECTION_NAME", "CROMA_OPENAI_COLLECTION_NAME"),
     )
+    # 서버 기동 시 OpenAI 컬렉션이 비어 있으면 자동 ingest. 비용/시간 이슈로 기본 False.
+    auto_ingest_openai_on_startup: bool = False
+    # 자동 ingest 시 최대 처리 청크 수 (None=전체). chunks.jsonl 12.3만건 전체는 비용/시간 큼.
+    auto_ingest_openai_limit: int | None = 5000
 
     # === Crawling ===
     smu_notice_list_url: str = "https://www.smu.ac.kr/kor/life/notice.do?srCampus=smu"

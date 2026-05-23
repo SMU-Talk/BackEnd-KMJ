@@ -120,6 +120,14 @@ def verify_chroma_connection() -> tuple[bool, str]:
         return False, f"{type(exc).__name__}: {exc}"
 
 
+def active_collection_count() -> int:
+    """현재 provider 가 가리키는 컬렉션의 항목 수. 실패하면 -1."""
+    try:
+        return int(get_collection().count())
+    except Exception:  # noqa: BLE001
+        return -1
+
+
 def _scalar(value: Any) -> Any:
     if value is None:
         return ""

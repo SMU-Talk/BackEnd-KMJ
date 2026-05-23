@@ -12,6 +12,7 @@ from app.Crawl import run_crawl_job, start_scheduler, stop_scheduler
 from app.database import create_tables
 from app.login.router import router as auth_router
 from app.rag import (
+    active_collection_count,
     active_collection_name,
     ensure_collection_populated,
     ingest_chunks_with_openai,
@@ -50,8 +51,9 @@ async def lifespan(_: FastAPI):
 
     asyncio.create_task(_healthcheck())
 
-    # === Chroma ingest (Qwen 사전임베딩 모드일 때만; OpenAI 모드는 별도 엔드포인트로) ===
-    if (settings.embedding_provider or "").lower() != "openai":
+    # === Chroma ingest ===
+    provider = (settings.embedding_provider or "").lower()
+    if provider != "openai":
         async def _ingest():
             try:
                 await asyncio.to_thread(ensure_collection_populated)
@@ -60,10 +62,48 @@ async def lifespan(_: FastAPI):
 
         asyncio.create_task(_ingest())
     else:
-        logger.info(
-            "embedding_provider=openai 이므로 startup 자동 ingest 는 비활성. "
-            "POST /internal/rag/ingest_openai 로 트리거하세요."
-        )
+        async def _check_or_autoingest():
+            try:
+                count = await asyncio.to_thread(active_collection_count)
+            except Exception:  # noqa: BLE001
+                logger.exception("Chroma 컬렉션 카운트 조회 실패")
+                return
+
+            logger.info(
+                "[rag] 활성 컬렉션 '%s' 의 현재 항목 수: %d",
+                active_collection_name(),
+                count,
+            )
+
+            if count > 0:
+                return
+
+            if settings.auto_ingest_openai_on_startup:
+                logger.warning(
+                    "[rag] 컬렉션이 비어 있어 자동 OpenAI ingest 를 시작합니다 (limit=%s). "
+                    "비용·시간이 소요됩니다.",
+                    settings.auto_ingest_openai_limit,
+                )
+                try:
+                    inserted = await asyncio.to_thread(
+                        ingest_chunks_with_openai,
+                        settings.auto_ingest_openai_limit,
+                        100,
+                        False,
+                    )
+                    logger.info("[rag] 자동 OpenAI ingest 완료: %d 건 적재", inserted)
+                except Exception:  # noqa: BLE001
+                    logger.exception("자동 OpenAI ingest 실패 (서비스는 계속 동작)")
+            else:
+                logger.warning(
+                    "[rag] 활성 컬렉션 '%s' 이 비어 있습니다. RAG 답변이 동작하지 않습니다.\n"
+                    "    → 다음 명령으로 적재하세요:\n"
+                    "      curl -X POST 'http://localhost:8001/internal/rag/ingest_openai?limit=2000'\n"
+                    "    → 또는 .env 에 AUTO_INGEST_OPENAI_ON_STARTUP=true 를 설정하세요.",
+                    active_collection_name(),
+                )
+
+        asyncio.create_task(_check_or_autoingest())
 
     start_scheduler()
 
@@ -127,6 +167,7 @@ def health_full() -> dict[str, dict]:
             "detail": msg_ch,
             "provider": settings.embedding_provider,
             "collection": active_collection_name(),
+            "count": active_collection_count(),
         },
     }
 

@@ -37,6 +37,17 @@ def retrieve_context(question: str, filters: ChatFilters) -> tuple[list[Notice],
         logger.warning("Chroma 컬렉션 연결 실패 — RAG 비활성화: %s", exc)
         return [], ""
 
+    try:
+        col_count = collection.count()
+    except Exception:  # noqa: BLE001
+        col_count = -1
+    if col_count == 0:
+        logger.warning(
+            "[rag] 활성 컬렉션 '%s' 이 비어 있습니다. 답변에 사용할 공지가 없습니다. "
+            "OpenAI 임베딩으로 채우려면 POST /internal/rag/ingest_openai 를 호출하세요.",
+            collection.name if hasattr(collection, "name") else "?",
+        )
+
     query_vec = embed_query(question)
     where = _build_where(filters)
 
@@ -52,6 +63,13 @@ def retrieve_context(question: str, filters: ChatFilters) -> tuple[list[Notice],
 
     docs = (result.get("documents") or [[]])[0]
     metas = (result.get("metadatas") or [[]])[0]
+    logger.info(
+        "[rag] 질의 결과 hits=%d collection_count=%s filter=%s question=%r",
+        len(docs),
+        col_count,
+        where,
+        question[:80],
+    )
 
     notices: list[Notice] = []
     context_blocks: list[str] = []
