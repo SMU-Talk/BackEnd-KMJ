@@ -62,12 +62,12 @@ def get_chroma_client():
     # chromadb >=0.5.5 CloudClient 사용 (Chroma Cloud)
     _client = chromadb.CloudClient(
         api_key=settings.croma_api_key,
-        tenant=settings.chroma_tenant,
+        tenant=settings.croma_tenant_id,
         database=settings.chroma_database,
     )
     logger.info(
         "Chroma Cloud 연결 완료: tenant=%s database=%s",
-        settings.chroma_tenant,
+        settings.croma_tenant_id,
         settings.chroma_database,
     )
     return _client
@@ -84,10 +84,10 @@ def get_collection():
         settings = get_settings()
         client = get_chroma_client()
         _collection = client.get_or_create_collection(
-            name=settings.chroma_collection,
+            name=settings.croma_collection_name,
             metadata={"hnsw:space": "cosine"},
         )
-        logger.info("Chroma 컬렉션 확보: %s", settings.chroma_collection)
+        logger.info("Chroma 컬렉션 확보: %s", settings.croma_collection_name)
         return _collection
 
 

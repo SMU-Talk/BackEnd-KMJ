@@ -37,11 +37,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_chat_model: str = "gpt-4o-mini"
 
-    # NOTE: env key is `CROMA_API_KEY` per project convention; settings field name maps via env.
+    # NOTE: env keys use `CROMA_*` per project convention; settings field names map via env.
     croma_api_key: str = ""
-    chroma_tenant: str = "default_tenant"
+    croma_tenant_id: str = "default_tenant"
     chroma_database: str = "default_database"
-    chroma_collection: str = "smu_notices"
+    croma_collection_name: str = "smu_notices"
     chroma_top_k: int = 5
 
     embedding_dim: int = 2560
